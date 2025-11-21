@@ -112,6 +112,8 @@ class VietnameseImageTextGenerator:
         self.output_dir.mkdir(exist_ok=True)
         self.width = width
         self.height = height
+        self.original_width = width  # Lưu kích thước gốc
+        self.original_height = height  # Lưu kích thước gốc
         self.max_image_size = 2048  # Giới hạn kích thước ảnh tối đa để tránh MemoryError
         
         # Tạo thư mục con
@@ -430,14 +432,20 @@ class VietnameseImageTextGenerator:
             current_x += char_width + line_spacing
     
     def generate_image_with_text(self, text: str, image_id: int) -> Tuple[Image.Image, dict]:
-        """Tạo ảnh với text tiếng Việt ngang, sau đó xoay ảnh ngẫu nhiên từ 90-360 độ hoặc không xoay"""
-        # Chọn ngẫu nhiên góc xoay: 0 độ (không xoay) hoặc từ 90 đến 360 độ
-        # Tỷ lệ: 50% không xoay, 50% xoay
-        if random.random() < 0.5:
+        """Tạo ảnh với text tiếng Việt ngang, sau đó xoay ảnh -30, 0, hoặc +30 độ so với trục ngang"""
+        # Đếm số từ trong text
+        word_count = len(text.split())
+        
+        # Xác định font size và rotation angle dựa trên số từ
+        if word_count > 10:
+            # Với text > 10 từ: font size 104-120 và không xoay
+            font_size = random.randint(104, 120)
             rotation_angle = 0  # Không xoay
         else:
-            # Xoay ngẫu nhiên từ 90 đến 360 độ (bất kỳ góc nào)
-            rotation_angle = random.randint(90, 360)
+            # Với text <= 10 từ: font size 104-170 và có thể xoay
+            font_size = random.randint(104, 170)
+            # Chọn ngẫu nhiên góc xoay: -30 độ (xuống), 0 độ (không xoay), hoặc +30 độ (lên)
+            rotation_angle = random.choice([-30, 0, 30])
         
         # Tạo background
         img = self._generate_background()
@@ -452,176 +460,93 @@ class VietnameseImageTextGenerator:
         
         # Tính toán vị trí và kích thước text (luôn ngang)
         current_font = None
-        font_size = 48
         max_width = int(self.width * 0.9)  # Để lại margin 5% mỗi bên
         max_height = int(self.height * 0.9)
         
-        # Thử các font size từ lớn đến nhỏ - điều chỉnh theo kích thước ảnh
-        # Font size tối đa dựa trên kích thước ảnh nhỏ hơn
-        max_font_size = min(72, int(min(self.width, self.height) * 0.15))
-        min_font_size = max(12, int(min(self.width, self.height) * 0.02))
-        
-        # Xử lý text ngang - chỉ 1 dòng, không wrap
-        # Tính font size để fit text vào 1 dòng
-        optimal_font_size = None
-        optimal_font = None
-        
-        for test_size in range(max_font_size, min_font_size - 1, -1):  # Giảm từng 1 để tìm size phù hợp
-            try:
-                if font_path and os.path.exists(font_path):
-                    test_font = ImageFont.truetype(font_path, test_size)
-                else:
-                    test_font = self.font
-                
-                # Tính kích thước text trên 1 dòng
-                bbox = draw.textbbox((0, 0), text, font=test_font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-                
-                # Kiểm tra xem text có fit vào 1 dòng không
-                if text_width <= max_width and text_height <= max_height:
-                    optimal_font = test_font
-                    optimal_font_size = test_size
-                    break
-            except Exception as e:
-                continue
-        
-        # Nếu không tìm được font size phù hợp, dùng font nhỏ nhất
-        if optimal_font is None:
-            if font_path and os.path.exists(font_path):
-                optimal_font = ImageFont.truetype(font_path, min_font_size)
-            else:
-                optimal_font = self.font
-            optimal_font_size = min_font_size
-        
-        # Thêm sự ngẫu nhiên cho font size nhưng vẫn đảm bảo đọc được
-        # Random factor: giảm font size từ 0% đến 40% (đảm bảo vẫn đọc được)
-        # Font size tối thiểu là 60% của optimal size hoặc min_font_size, lấy giá trị lớn hơn
-        random_factor = random.uniform(0.6, 1.0)  # Từ 60% đến 100% của optimal size
-        font_size = max(
-            int(optimal_font_size * random_factor),
-            max(min_font_size, int(optimal_font_size * 0.6))  # Tối thiểu 60% của optimal hoặc min_font_size
-        )
-        
-        # Tạo font với size đã điều chỉnh ngẫu nhiên
+        # Tạo font với size ngẫu nhiên
         if font_path and os.path.exists(font_path):
             current_font = ImageFont.truetype(font_path, font_size)
         else:
-            # Nếu không có font path, scale font hiện tại (không lý tưởng nhưng fallback)
-            current_font = optimal_font
+            current_font = self.font
         
-        # Tính lại kích thước với font đã điều chỉnh ngẫu nhiên
-        bbox = draw.textbbox((0, 0), text, font=current_font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
+        # Wrap text thành nhiều dòng nếu quá dài
+        lines = self._wrap_text(text, current_font, max_width)
         
-        # Đảm bảo text vẫn fit sau khi điều chỉnh ngẫu nhiên
-        # Nếu text quá dài, giảm font size xuống cho đến khi fit
-        if text_width > max_width or text_height > max_height:
+        # Tính kích thước tổng của tất cả các dòng
+        line_heights = []
+        line_widths = []
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=current_font)
+            line_widths.append(bbox[2] - bbox[0])
+            line_heights.append(bbox[3] - bbox[1])
+        
+        total_height = sum(line_heights)
+        line_spacing = int(line_heights[0] * 0.2) if line_heights else 5
+        total_height += line_spacing * (len(lines) - 1)
+        max_line_width = max(line_widths) if line_widths else 0
+        
+        # Nếu tổng chiều cao vẫn quá lớn, giảm font size
+        min_font_size = 40
+        if total_height > max_height:
             # Giảm font size cho đến khi fit
-            while (text_width > max_width or text_height > max_height) and font_size > min_font_size:
+            while total_height > max_height and font_size > min_font_size:
                 font_size = max(font_size - 1, min_font_size)
                 if font_path and os.path.exists(font_path):
                     current_font = ImageFont.truetype(font_path, font_size)
                 else:
-                    current_font = optimal_font
+                    current_font = self.font
                 
-                bbox = draw.textbbox((0, 0), text, font=current_font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
+                # Tính lại với font size mới
+                lines = self._wrap_text(text, current_font, max_width)
+                line_heights = []
+                line_widths = []
+                for line in lines:
+                    bbox = draw.textbbox((0, 0), line, font=current_font)
+                    line_widths.append(bbox[2] - bbox[0])
+                    line_heights.append(bbox[3] - bbox[1])
+                
+                total_height = sum(line_heights)
+                line_spacing = int(line_heights[0] * 0.2) if line_heights else 5
+                total_height += line_spacing * (len(lines) - 1)
+                max_line_width = max(line_widths) if line_widths else 0
         
-        # Nếu text vẫn quá dài sau khi giảm font size, tăng kích thước ảnh (giữ tỷ lệ vuông)
-        # Nhưng giới hạn kích thước tối đa để tránh MemoryError
-        if text_width > max_width:
-            # Tính scale factor để fit text
-            scale_factor = text_width / max_width
-            # Tăng kích thước nhưng giữ tỷ lệ vuông - lấy giá trị lớn hơn
-            base_size = max(self.width, self.height)
-            new_size = int(base_size * scale_factor * 1.1)  # Thêm 10% margin
-            
-            # Giới hạn kích thước tối đa
-            if new_size > self.max_image_size:
-                # Nếu vượt quá giới hạn, giảm font size thay vì tăng ảnh
-                # Tính font size mới để fit vào kích thước tối đa
-                max_allowed_width = int(self.max_image_size * 0.9)
-                font_scale = max_allowed_width / text_width
-                font_size = max(int(font_size * font_scale), min_font_size)
-                
-                if font_path and os.path.exists(font_path):
-                    current_font = ImageFont.truetype(font_path, font_size)
-                else:
-                    current_font = optimal_font
-                
-                # Tính lại kích thước text
-                bbox = draw.textbbox((0, 0), text, font=current_font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-            else:
-                # Tạo lại ảnh với kích thước vuông mới (trong giới hạn)
-                img = Image.new('RGB', (new_size, new_size), (255, 255, 255))
-                draw = ImageDraw.Draw(img)
-                
-                # Cập nhật kích thước
-                self.width = new_size
-                self.height = new_size
-                max_width = int(self.width * 0.9)
-                max_height = int(self.height * 0.9)
-                
-                # Tính lại kích thước text với ảnh mới
-                bbox = draw.textbbox((0, 0), text, font=current_font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-        
-        # Text ngang chỉ có 1 dòng
-        max_line_width = text_width
-        total_height = text_height
-        # Render text ngang - chỉ 1 dòng
-        # Tính vị trí để căn giữa
+        # Render text ngang - có thể nhiều dòng
+        # Tính vị trí để căn giữa (cả ngang và dọc)
         start_y = (self.height - total_height) // 2
         
-        # Vẽ text trên 1 dòng duy nhất
-        x = (self.width - max_line_width) // 2
-        
-        try:
-            draw.text((x, start_y), text, font=current_font, fill=text_color)
-        except Exception as e:
-            # Nếu lỗi, thử với font mặc định
+        # Vẽ từng dòng
+        current_y = start_y
+        for i, line in enumerate(lines):
+            if not line.strip():  # Bỏ qua dòng trống
+                continue
+                
+            # Tính vị trí x để căn giữa dòng này
+            line_width = line_widths[i]
+            x = (self.width - line_width) // 2
+            
             try:
-                fallback_font = ImageFont.load_default()
-                draw.text((x, start_y), text, font=fallback_font, fill=text_color)
-            except:
-                pass
+                draw.text((x, current_y), line, font=current_font, fill=text_color)
+            except Exception as e:
+                # Nếu lỗi, thử với font mặc định
+                try:
+                    fallback_font = ImageFont.load_default()
+                    draw.text((x, current_y), line, font=fallback_font, fill=text_color)
+                except:
+                    pass
+            
+            # Di chuyển xuống dòng tiếp theo
+            current_y += line_heights[i] + line_spacing
         
-        # Xoay ảnh nếu góc xoay > 0
-        if rotation_angle > 0:
+        # Xoay ảnh nếu góc xoay != 0
+        if rotation_angle != 0:
             try:
-                # Kiểm tra kích thước ảnh trước khi xoay để tránh MemoryError
-                # Khi xoay với expand=True, ảnh có thể lớn hơn nhiều
-                # Ước tính kích thước sau khi xoay: max(width, height) * sqrt(2) cho góc 45 độ
-                # Với góc bất kỳ, ước tính tối đa là max(width, height) * 1.5
-                estimated_max_size = max(self.width, self.height) * 1.5
-                
-                if estimated_max_size > self.max_image_size:
-                    # Nếu ước tính vượt quá giới hạn, resize ảnh trước khi xoay
-                    scale = self.max_image_size / estimated_max_size
-                    new_w = int(self.width * scale)
-                    new_h = int(self.height * scale)
-                    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                    self.width, self.height = new_w, new_h
-                
-                img = img.rotate(rotation_angle, expand=True)
-                # Cập nhật kích thước sau khi xoay
-                self.width, self.height = img.size
-                
-                # Nếu sau khi xoay vẫn quá lớn, resize lại
-                if max(self.width, self.height) > self.max_image_size:
-                    scale = self.max_image_size / max(self.width, self.height)
-                    new_w = int(self.width * scale)
-                    new_h = int(self.height * scale)
-                    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                    self.width, self.height = new_w, new_h
+                img = img.rotate(rotation_angle, expand=True, fillcolor=(255, 255, 255))
+                # Sau khi xoay, resize về kích thước gốc để đảm bảo tất cả ảnh có cùng kích thước
+                img = img.resize((self.original_width, self.original_height), Image.Resampling.LANCZOS)
+                self.width = self.original_width
+                self.height = self.original_height
             except MemoryError:
-                # Nếu vẫn bị MemoryError, bỏ qua việc xoay
+                # Nếu bị MemoryError, bỏ qua việc xoay và giữ ảnh gốc
                 rotation_angle = 0
                 try:
                     print(f"Warning: MemoryError when rotating image {image_id}, skipping rotation")
@@ -638,12 +563,12 @@ class VietnameseImageTextGenerator:
             "image_id": image_id,
             "text": text,
             "prompt": prompt,
-            "width": self.width,
-            "height": self.height,
+            "width": self.original_width,
+            "height": self.original_height,
             "font_size": font_size,
-            "num_lines": num_lines,
+            "num_lines": len(lines),
             "rotation_angle": rotation_angle,
-            "orientation": "rotated" if rotation_angle > 0 else "horizontal"
+            "orientation": "rotated" if rotation_angle != 0 else "horizontal"
         }
         
         return img, metadata
@@ -660,23 +585,46 @@ class VietnameseImageTextGenerator:
         
         for i in range(num_images):
             # Chọn prompt ngẫu nhiên
-            if text_source == "words":
+            max_attempts = 10  # Số lần thử tối đa để tìm prompt phù hợp
+            text = None
+            
+            for attempt in range(max_attempts):
+                if text_source == "words":
+                    text = random.choice(IMAGE_GEN_SHORT_PROMPTS)
+                elif text_source == "phrases":
+                    text = random.choice(IMAGE_GEN_MEDIUM_PROMPTS)
+                elif text_source == "sentences":
+                    text = random.choice(IMAGE_GEN_DETAILED_PROMPTS)
+                else:  # mixed
+                    text = random.choice(
+                        IMAGE_GEN_SHORT_PROMPTS + IMAGE_GEN_MEDIUM_PROMPTS + IMAGE_GEN_DETAILED_PROMPTS
+                    )
+                
+                # Đếm số từ
+                word_count = len(text.split())
+                
+                # Chỉ chấp nhận prompt có <= 20 từ
+                if word_count <= 20:
+                    break
+                else:
+                    # Nếu quá 20 từ, thử lại với prompt ngắn hơn
+                    # Ưu tiên chọn từ SHORT_PROMPTS hoặc MEDIUM_PROMPTS
+                    if attempt < max_attempts - 1:
+                        text = random.choice(IMAGE_GEN_SHORT_PROMPTS + IMAGE_GEN_MEDIUM_PROMPTS)
+                        word_count = len(text.split())
+                        if word_count <= 20:
+                            break
+            
+            # Nếu vẫn không tìm được, dùng prompt ngắn nhất
+            if text is None or len(text.split()) > 20:
                 text = random.choice(IMAGE_GEN_SHORT_PROMPTS)
-            elif text_source == "phrases":
-                text = random.choice(IMAGE_GEN_MEDIUM_PROMPTS)
-            elif text_source == "sentences":
-                text = random.choice(IMAGE_GEN_DETAILED_PROMPTS)
-            else:  # mixed
-                text = random.choice(
-                    IMAGE_GEN_SHORT_PROMPTS + IMAGE_GEN_MEDIUM_PROMPTS + IMAGE_GEN_DETAILED_PROMPTS
-                )
             
             # Tạo ảnh
             img, metadata = self.generate_image_with_text(text, i)
             
-            # Đảm bảo ảnh có đúng kích thước (resize nếu cần)
-            if img.size != (self.width, self.height):
-                img = img.resize((self.width, self.height), Image.Resampling.LANCZOS)
+            # Đảm bảo ảnh có đúng kích thước gốc (resize nếu cần)
+            if img.size != (self.original_width, self.original_height):
+                img = img.resize((self.original_width, self.original_height), Image.Resampling.LANCZOS)
             
             # Lưu ảnh
             img_path = self.output_dir / "images" / f"image_{i:06d}.png"
@@ -720,10 +668,8 @@ def main():
                        help="Số lượng ảnh cần tạo (default: 1000)")
     parser.add_argument("--output_dir", type=str, default="vietnamese_dataset",
                        help="Thư mục output (default: vietnamese_dataset)")
-    parser.add_argument("--width", type=int, default=512,
-                       help="Chiều rộng ảnh (default: 512)")
-    parser.add_argument("--height", type=int, default=512,
-                       help="Chiều cao ảnh (default: 512)")
+    parser.add_argument("--image_size", type=int, default=1328,
+                       help="Kích thước ảnh vuông (width = height, default: 1328)")
     parser.add_argument("--text_source", type=str, default="mixed",
                        choices=["words", "phrases", "sentences", "mixed"],
                        help="Nguồn prompt: words (ngắn), phrases (trung bình), sentences (chi tiết), hoặc mixed (default: mixed)")
@@ -732,8 +678,8 @@ def main():
     
     generator = VietnameseImageTextGenerator(
         output_dir=args.output_dir,
-        width=args.width,
-        height=args.height
+        width=args.image_size,
+        height=args.image_size
     )
     
     generator.generate_dataset(
